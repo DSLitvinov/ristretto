@@ -74,7 +74,7 @@ msgstr "_Datoteka"
 #. Icon-name
 #: src/main_window.c:347
 msgid "_Open..."
-msgstr "_Odpri..."
+msgstr "_Odpri ..."
 
 #. Label-text
 #. Keyboard shortcut
@@ -85,7 +85,7 @@ msgstr "Odpri sliko"
 #. Icon-name
 #: src/main_window.c:353
 msgid "_Save copy..."
-msgstr "_Shrani kopijo..."
+msgstr "_Shrani kopijo ..."
 
 #. Label-text
 #. Keyboard shortcut
@@ -96,7 +96,7 @@ msgstr "Shrani kopijo slike"
 #. Icon-name
 #: src/main_window.c:359
 msgid "Proper_ties..."
-msgstr "_Lastnosti..."
+msgstr "_Lastnosti ..."
 
 #. Label-text
 #. Keyboard shortcut
@@ -107,7 +107,7 @@ msgstr "Prikaži nastavitve datoteke"
 #. Icon-name
 #: src/main_window.c:365
 msgid "_Print..."
-msgstr "_Natisni..."
+msgstr "_Natisni ..."
 
 #. Label-text
 #. Keyboard shortcut
@@ -183,12 +183,12 @@ msgstr "Izbriši sliko z diska"
 #. Icon-name
 #: src/main_window.c:432
 msgid "_Clear private data..."
-msgstr "Pobriši _zasebne podatke..."
+msgstr "Pobriši _zasebne podatke ..."
 
 #. Icon-name
 #: src/main_window.c:438
 msgid "_Preferences..."
-msgstr "_Nastavitve..."
+msgstr "_Nastavitve ..."
 
 #: src/main_window.c:445
 msgid "_View"
@@ -219,7 +219,7 @@ msgstr "Zapusti celozaslonski način"
 #. Icon-name
 #: src/main_window.c:463
 msgid "Set as _Wallpaper..."
-msgstr "Nastavi kot _ozadje..."
+msgstr "Nastavi kot _ozadje ..."
 
 #: src/main_window.c:470
 msgid "_Zoom"
@@ -518,7 +518,7 @@ msgstr "Ustavi diaprojekcijo"
 #. Create Recently used items Action
 #: src/main_window.c:1014
 msgid "_Recently used"
-msgstr "_Nedavno uporabljene"
+msgstr "Nedavno _uporabljene"
 
 #: src/main_window.c:1014
 msgid "Recently used"
@@ -530,7 +530,7 @@ msgstr "Za izbiro slike kliknite na odpri"
 
 #: src/main_window.c:1630 src/main_window.c:1635
 msgid "Open With Other _Application..."
-msgstr "Odpri z drugim progr_amom"
+msgstr "Odpri z drugim progr_amom ..."
 
 #: src/main_window.c:1645 src/main_window.c:1653
 msgid "Empty"
@@ -538,7 +538,7 @@ msgstr "Prazno"
 
 #: src/main_window.c:1692
 msgid "Loading..."
-msgstr "Nalagam..."
+msgstr "Nalagam ..."
 
 #: src/main_window.c:2532
 msgid "Choose 'set wallpaper' method"
@@ -580,7 +580,7 @@ msgstr "Ristretto je pregledovalnik slik za Xfce namizno okolje."
 
 #: src/main_window.c:3079
 msgid "translator-credits"
-msgstr "zasluge prevajalcevPrevedel:\nGašper <gasper@gmx.com> & Nenad <nenadlatinovic@lavabit.com>"
+msgstr "Gašper <gasper@gmx.com>\nNenad <nenadlatinovic@lavabit.com>"
 
 #: src/main_window.c:3638
 msgid "Open image"
@@ -955,7 +955,7 @@ msgstr "Enostavno pregledovanje slik"
 
 #: org.xfce.ristretto.desktop.in:13
 msgid "image;photo;picture;viewer;graphics;"
-msgstr ""
+msgstr "image;photo;picture;viewer;graphics;slika;slike;fotografija;fotografije;pregledovalnik;grafika;"
 
 #: org.xfce.ristretto.appdata.xml.in:7
 msgid "Ristretto"
