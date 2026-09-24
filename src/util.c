@@ -116,11 +116,6 @@ rstto_util_set_source_pixbuf (cairo_t *ctx,
 
     pattern = cairo_pattern_reference (cairo_get_source (cr));
     cairo_destroy (cr);
-    if (pattern == NULL || cairo_pattern_status (pattern) != CAIRO_STATUS_SUCCESS)
-    {
-        g_clear_pointer (&pattern, cairo_pattern_destroy);
-        return NULL;
-    }
 
     /* put the source in the original context, if any  */
     if (ctx != NULL)
