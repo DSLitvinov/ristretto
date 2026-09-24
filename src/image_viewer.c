@@ -43,10 +43,6 @@
 /* cairo-image-surface.c rejects surfaces with width or height above this */
 #define MAX_IMAGE_SIZE 32767
 
-/* Tiles stay far enough below that limit that a filter bleed still fits in one surface. */
-#define RSTTO_IMAGE_TILE_SIZE 16384
-#define RSTTO_IMAGE_TILE_BLEED 2
-
 #define BACKGROUND_ICON_SIZE 128
 
 #define MAX_OVER_VISIBLE 1.5
@@ -250,19 +246,6 @@ struct _RsttoImageViewerTransaction
     gssize read_bytes;
 };
 
-typedef struct
-{
-    cairo_pattern_t *pattern;
-    /* logical rectangle inside the full pixbuf */
-    gint x;
-    gint y;
-    gint width;
-    gint height;
-    /* pixel origin of this surface inside the full pixbuf (includes bleed) */
-    gint origin_x;
-    gint origin_y;
-} RsttoPixbufTile;
-
 struct _RsttoImageViewerPrivate
 {
     RsttoFile *file;
@@ -282,7 +265,8 @@ struct _RsttoImageViewerPrivate
     struct
     {
         cairo_pattern_t *pattern;
-        GArray *tiles;
+        /* full-resolution pixels when a single cairo surface cannot hold them */
+        GdkPixbuf *pixels;
         gboolean has_alpha;
         gint width;
         gint height;
@@ -1016,26 +1000,14 @@ paint_clock (GtkWidget *widget,
 static void
 rstto_image_viewer_clear_pixbuf (RsttoImageViewer *viewer)
 {
-    guint i;
-
     g_clear_pointer (&viewer->priv->pixbuf.pattern, cairo_pattern_destroy);
-    if (viewer->priv->pixbuf.tiles == NULL)
-        return;
-
-    for (i = 0; i < viewer->priv->pixbuf.tiles->len; i++)
-    {
-        RsttoPixbufTile *tile = &g_array_index (viewer->priv->pixbuf.tiles, RsttoPixbufTile, i);
-        cairo_pattern_destroy (tile->pattern);
-    }
-    g_array_free (viewer->priv->pixbuf.tiles, TRUE);
-    viewer->priv->pixbuf.tiles = NULL;
+    g_clear_object (&viewer->priv->pixbuf.pixels);
 }
 
 static void
 rstto_image_viewer_apply_device_scale (RsttoImageViewer *viewer)
 {
     gdouble factor = viewer->priv->scale_factor;
-    guint i;
 
     if (viewer->priv->pixbuf.pattern != NULL)
     {
@@ -1045,69 +1017,12 @@ rstto_image_viewer_apply_device_scale (RsttoImageViewer *viewer)
             && surface != NULL)
             cairo_surface_set_device_scale (surface, factor, factor);
     }
-
-    if (viewer->priv->pixbuf.tiles == NULL)
-        return;
-
-    for (i = 0; i < viewer->priv->pixbuf.tiles->len; i++)
-    {
-        RsttoPixbufTile *tile = &g_array_index (viewer->priv->pixbuf.tiles, RsttoPixbufTile, i);
-        cairo_surface_t *surface = NULL;
-
-        if (cairo_pattern_get_surface (tile->pattern, &surface) == CAIRO_STATUS_SUCCESS
-            && surface != NULL)
-            cairo_surface_set_device_scale (surface, factor, factor);
-    }
-}
-
-static void
-rstto_image_viewer_add_tile (RsttoImageViewer *viewer,
-                             GdkPixbuf *pixbuf,
-                             gint x,
-                             gint y,
-                             gint width,
-                             gint height)
-{
-    gint src_width = gdk_pixbuf_get_width (pixbuf);
-    gint src_height = gdk_pixbuf_get_height (pixbuf);
-    gint sx = MAX (0, x - RSTTO_IMAGE_TILE_BLEED);
-    gint sy = MAX (0, y - RSTTO_IMAGE_TILE_BLEED);
-    gint ex = MIN (src_width, x + width + RSTTO_IMAGE_TILE_BLEED);
-    gint ey = MIN (src_height, y + height + RSTTO_IMAGE_TILE_BLEED);
-    GdkPixbuf *sub;
-    cairo_pattern_t *pattern;
-    RsttoPixbufTile tile;
-
-    if (ex - sx > MAX_IMAGE_SIZE)
-        ex = sx + MAX_IMAGE_SIZE;
-    if (ey - sy > MAX_IMAGE_SIZE)
-        ey = sy + MAX_IMAGE_SIZE;
-    if (x < sx || y < sy || x + width > ex || y + height > ey)
-        return;
-
-    sub = gdk_pixbuf_new_subpixbuf (pixbuf, sx, sy, ex - sx, ey - sy);
-    if (sub == NULL)
-        return;
-
-    pattern = rstto_util_set_source_pixbuf (NULL, sub, 0, 0);
-    g_object_unref (sub);
-    if (pattern == NULL)
-        return;
-
-    tile.pattern = pattern;
-    tile.x = x;
-    tile.y = y;
-    tile.width = width;
-    tile.height = height;
-    tile.origin_x = sx;
-    tile.origin_y = sy;
-    g_array_append_val (viewer->priv->pixbuf.tiles, tile);
 }
 
 /*
  * Images with a side longer than MAX_IMAGE_SIZE cannot live in one cairo surface.
- * Keep every source pixel and split the pixbuf into tiles cairo can draw, so zoom
- * and panning still cover the original file.
+ * Keep the original pixbuf and, when painting, scale only the pixels that fall
+ * inside the window.
  */
 static void
 rstto_image_viewer_set_image_pixbuf (RsttoImageViewer *viewer,
@@ -1115,7 +1030,6 @@ rstto_image_viewer_set_image_pixbuf (RsttoImageViewer *viewer,
 {
     gint width = gdk_pixbuf_get_width (pixbuf);
     gint height = gdk_pixbuf_get_height (pixbuf);
-    gint y;
 
     rstto_image_viewer_clear_pixbuf (viewer);
     viewer->priv->pixbuf.has_alpha = gdk_pixbuf_get_has_alpha (pixbuf);
@@ -1129,20 +1043,187 @@ rstto_image_viewer_set_image_pixbuf (RsttoImageViewer *viewer,
         return;
     }
 
-    viewer->priv->pixbuf.tiles = g_array_new (FALSE, FALSE, sizeof (RsttoPixbufTile));
-    for (y = 0; y < height; y += RSTTO_IMAGE_TILE_SIZE)
-    {
-        gint th = MIN (RSTTO_IMAGE_TILE_SIZE, height - y);
-        gint x;
+    viewer->priv->pixbuf.pixels = g_object_ref (pixbuf);
+}
 
-        for (x = 0; x < width; x += RSTTO_IMAGE_TILE_SIZE)
+/*
+ * gdk-pixbuf scales in 16.16 fixed point and cannot address a source wider
+ * than 32767 px, so copy the visible region directly. A running coordinate in
+ * 64-bit 16.16 fixed point keeps 1:1 pixels exact without a double division
+ * per pixel, which is far too slow on a multi-megapixel source.
+ */
+static void
+sample_pixbuf_region (const GdkPixbuf *src,
+                      GdkPixbuf *dest,
+                      gdouble px1,
+                      gdouble py1,
+                      gdouble px2,
+                      gdouble py2,
+                      gboolean smoothing)
+{
+    const gint src_w = gdk_pixbuf_get_width (src);
+    const gint src_h = gdk_pixbuf_get_height (src);
+    const gint dest_w = gdk_pixbuf_get_width (dest);
+    const gint dest_h = gdk_pixbuf_get_height (dest);
+    const gint n = gdk_pixbuf_get_n_channels (src);
+    const gint src_stride = gdk_pixbuf_get_rowstride (src);
+    const gint dest_stride = gdk_pixbuf_get_rowstride (dest);
+    const guchar *src_pixels = gdk_pixbuf_get_pixels (src);
+    guchar *dest_pixels = gdk_pixbuf_get_pixels (dest);
+    const gint64 x_origin = (gint64) floor ((px1 - 0.5) * 65536.0 + 0.5);
+    const gint64 y_origin = (gint64) floor ((py1 - 0.5) * 65536.0 + 0.5);
+    const gint64 x_span = (gint64) floor ((px2 - px1) * 65536.0 + 0.5);
+    const gint64 y_span = (gint64) floor ((py2 - py1) * 65536.0 + 0.5);
+    const gint64 x_half = x_span / (2 * (gint64) dest_w);
+    const gint64 y_half = y_span / (2 * (gint64) dest_h);
+    gint x, y, c;
+
+    for (y = 0; y < dest_h; y++)
+    {
+        gint64 sy_fp = y_origin + ((gint64) y * y_span) / dest_h + y_half;
+        gint y0;
+
+        if (sy_fp < 0)
+            sy_fp = 0;
+        if (sy_fp > ((gint64) src_h - 1) << 16)
+            sy_fp = ((gint64) src_h - 1) << 16;
+
+        y0 = CLAMP ((gint) (sy_fp >> 16), 0, src_h - 1);
+        gint fy = (gint) (sy_fp & 0xffff);
+        gint iy = CLAMP ((gint) ((sy_fp + 32768) >> 16), 0, src_h - 1);
+        gint y1 = CLAMP (y0 + (fy ? 1 : 0), 0, src_h - 1);
+        const guchar *row_n = src_pixels + iy * src_stride;
+        const guchar *row0 = src_pixels + y0 * src_stride;
+        const guchar *row1 = src_pixels + y1 * src_stride;
+        guchar *drow = dest_pixels + y * dest_stride;
+
+        for (x = 0; x < dest_w; x++)
         {
-            gint tw = MIN (RSTTO_IMAGE_TILE_SIZE, width - x);
-            rstto_image_viewer_add_tile (viewer, pixbuf, x, y, tw, th);
+            gint64 sx_fp = x_origin + ((gint64) x * x_span) / dest_w + x_half;
+            guchar *d = drow + x * n;
+
+            if (sx_fp < 0)
+                sx_fp = 0;
+            if (sx_fp > ((gint64) src_w - 1) << 16)
+                sx_fp = ((gint64) src_w - 1) << 16;
+
+            if (!smoothing)
+            {
+                gint ix = CLAMP ((gint) ((sx_fp + 32768) >> 16), 0, src_w - 1);
+                const guchar *s = row_n + ix * n;
+
+                for (c = 0; c < n; c++)
+                    d[c] = s[c];
+                continue;
+            }
+
+            {
+                gint x0 = CLAMP ((gint) (sx_fp >> 16), 0, src_w - 1);
+                gint fx = (gint) (sx_fp & 0xffff);
+                gint x1 = CLAMP (x0 + (fx ? 1 : 0), 0, src_w - 1);
+                const guchar *s00 = row0 + x0 * n;
+
+                if (fx == 0 && fy == 0)
+                {
+                    for (c = 0; c < n; c++)
+                        d[c] = s00[c];
+                    continue;
+                }
+
+                {
+                    const guchar *s10 = row0 + x1 * n;
+                    const guchar *s01 = row1 + x0 * n;
+                    const guchar *s11 = row1 + x1 * n;
+                    gint64 w00 = (gint64) (65536 - fx) * (65536 - fy);
+                    gint64 w10 = (gint64) fx * (65536 - fy);
+                    gint64 w01 = (gint64) (65536 - fx) * fy;
+                    gint64 w11 = (gint64) fx * fy;
+
+                    for (c = 0; c < n; c++)
+                        d[c] = (guchar) ((s00[c] * w00 + s10[c] * w10
+                                         + s01[c] * w01 + s11[c] * w11 + 2147483648LL) >> 32);
+                }
+            }
         }
     }
+}
 
-    rstto_image_viewer_apply_device_scale (viewer);
+/*
+ * Scale the visible part of an oversized pixbuf into a window-sized surface.
+ * ctx is already transformed so that user space is the image.
+ */
+static void
+paint_pixbuf_viewport (RsttoImageViewer *viewer,
+                       cairo_t *ctx)
+{
+    GdkPixbuf *src = viewer->priv->pixbuf.pixels;
+    gdouble factor = viewer->priv->scale_factor > 0.0 ? viewer->priv->scale_factor : 1.0;
+    gdouble user_w = gdk_pixbuf_get_width (src) / factor;
+    gdouble user_h = gdk_pixbuf_get_height (src) / factor;
+    gdouble ux1, uy1, ux2, uy2, uw, uh;
+    gdouble ax, ay, bx, by, cx, cy, dev_w, dev_h;
+    gdouble px1, py1, px2, py2;
+    gint dest_w, dest_h;
+    GdkPixbuf *dest;
+    cairo_pattern_t *pattern;
+    cairo_surface_t *surface = NULL;
+    cairo_matrix_t matrix;
+
+    cairo_clip_extents (ctx, &ux1, &uy1, &ux2, &uy2);
+    ux1 = CLAMP (ux1, 0.0, user_w);
+    uy1 = CLAMP (uy1, 0.0, user_h);
+    ux2 = CLAMP (ux2, 0.0, user_w);
+    uy2 = CLAMP (uy2, 0.0, user_h);
+    uw = ux2 - ux1;
+    uh = uy2 - uy1;
+    if (uw < 1e-6 || uh < 1e-6)
+        return;
+
+    ax = ux1;
+    ay = uy1;
+    bx = ux2;
+    by = uy1;
+    cx = ux1;
+    cy = uy2;
+    cairo_user_to_device (ctx, &ax, &ay);
+    cairo_user_to_device (ctx, &bx, &by);
+    cairo_user_to_device (ctx, &cx, &cy);
+    dev_w = hypot (bx - ax, by - ay);
+    dev_h = hypot (cx - ax, cy - ay);
+    dest_w = CLAMP ((gint) ceil (dev_w * factor), 1, MAX_IMAGE_SIZE);
+    dest_h = CLAMP ((gint) ceil (dev_h * factor), 1, MAX_IMAGE_SIZE);
+
+    dest = gdk_pixbuf_new (GDK_COLORSPACE_RGB,
+                           gdk_pixbuf_get_has_alpha (src),
+                           8, dest_w, dest_h);
+    if (dest == NULL)
+        return;
+
+    px1 = ux1 * factor;
+    py1 = uy1 * factor;
+    px2 = ux2 * factor;
+    py2 = uy2 * factor;
+    sample_pixbuf_region (src, dest, px1, py1, px2, py2, viewer->priv->enable_smoothing);
+
+    pattern = rstto_util_set_source_pixbuf (NULL, dest, 0, 0);
+    g_object_unref (dest);
+    if (pattern == NULL)
+        return;
+
+    if (cairo_pattern_get_surface (pattern, &surface) == CAIRO_STATUS_SUCCESS && surface != NULL)
+        cairo_surface_set_device_scale (surface, factor, factor);
+
+    /* pattern space is surface user space (pixels / device scale) */
+    cairo_matrix_init_scale (&matrix,
+                             (dest_w / factor) / uw,
+                             (dest_h / factor) / uh);
+    cairo_matrix_translate (&matrix, -ux1, -uy1);
+    cairo_pattern_set_matrix (pattern, &matrix);
+    cairo_pattern_set_filter (pattern, CAIRO_FILTER_NEAREST);
+    cairo_set_source (ctx, pattern);
+    cairo_rectangle (ctx, ux1, uy1, uw, uh);
+    cairo_fill (ctx);
+    cairo_pattern_destroy (pattern);
 }
 
 static void
@@ -1150,82 +1231,19 @@ paint_image_source (RsttoImageViewer *viewer,
                     cairo_t *ctx)
 {
     cairo_filter_t filter = viewer->priv->enable_smoothing ? CAIRO_FILTER_GOOD : CAIRO_FILTER_NEAREST;
-    gdouble inv_scale = viewer->priv->scale_factor > 0.0 ? 1.0 / viewer->priv->scale_factor : 1.0;
-    guint i;
 
-    if (viewer->priv->pixbuf.pattern != NULL)
+    if (viewer->priv->pixbuf.pixels != NULL)
     {
-        cairo_pattern_set_filter (viewer->priv->pixbuf.pattern, filter);
-        cairo_set_source (ctx, viewer->priv->pixbuf.pattern);
-        cairo_paint (ctx);
+        paint_pixbuf_viewport (viewer, ctx);
         return;
     }
 
-    if (viewer->priv->pixbuf.tiles == NULL)
+    if (viewer->priv->pixbuf.pattern == NULL)
         return;
 
-    for (i = 0; i < viewer->priv->pixbuf.tiles->len; i++)
-    {
-        RsttoPixbufTile *tile = &g_array_index (viewer->priv->pixbuf.tiles, RsttoPixbufTile, i);
-        cairo_matrix_t matrix;
-
-        cairo_matrix_init_translate (&matrix,
-                                     -tile->origin_x * inv_scale,
-                                     -tile->origin_y * inv_scale);
-        cairo_pattern_set_matrix (tile->pattern, &matrix);
-        cairo_pattern_set_filter (tile->pattern, filter);
-
-        cairo_save (ctx);
-        cairo_rectangle (ctx,
-                         tile->x * inv_scale,
-                         tile->y * inv_scale,
-                         tile->width * inv_scale,
-                         tile->height * inv_scale);
-        cairo_clip (ctx);
-        cairo_set_source (ctx, tile->pattern);
-        cairo_paint (ctx);
-        cairo_restore (ctx);
-    }
-}
-
-static GdkPixbuf *
-rstto_image_viewer_pixbuf_from_tiles (RsttoImageViewer *viewer)
-{
-    GdkPixbuf *out;
-    guint i;
-
-    out = gdk_pixbuf_new (GDK_COLORSPACE_RGB,
-                          viewer->priv->pixbuf.has_alpha,
-                          8,
-                          viewer->priv->pixbuf.width,
-                          viewer->priv->pixbuf.height);
-    if (out == NULL)
-        return NULL;
-
-    for (i = 0; i < viewer->priv->pixbuf.tiles->len; i++)
-    {
-        RsttoPixbufTile *tile = &g_array_index (viewer->priv->pixbuf.tiles, RsttoPixbufTile, i);
-        cairo_surface_t *surface = NULL;
-        GdkPixbuf *part;
-
-        if (cairo_pattern_get_surface (tile->pattern, &surface) != CAIRO_STATUS_SUCCESS
-            || surface == NULL)
-            continue;
-
-        part = gdk_pixbuf_get_from_surface (surface,
-                                            tile->x - tile->origin_x,
-                                            tile->y - tile->origin_y,
-                                            tile->width,
-                                            tile->height);
-        if (part == NULL)
-            continue;
-
-        if (gdk_pixbuf_get_has_alpha (part) == viewer->priv->pixbuf.has_alpha)
-            gdk_pixbuf_copy_area (part, 0, 0, tile->width, tile->height, out, tile->x, tile->y);
-        g_object_unref (part);
-    }
-
-    return out;
+    cairo_pattern_set_filter (viewer->priv->pixbuf.pattern, filter);
+    cairo_set_source (ctx, viewer->priv->pixbuf.pattern);
+    cairo_paint (ctx);
 }
 
 static void
@@ -1709,8 +1727,8 @@ rstto_image_viewer_get_pixbuf (RsttoImageViewer *viewer)
 {
     cairo_surface_t *surface = NULL;
 
-    if (viewer->priv->pixbuf.tiles != NULL)
-        return rstto_image_viewer_pixbuf_from_tiles (viewer);
+    if (viewer->priv->pixbuf.pixels != NULL)
+        return g_object_ref (viewer->priv->pixbuf.pixels);
 
     if (viewer->priv->pixbuf.pattern == NULL)
         return NULL;
