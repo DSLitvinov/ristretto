@@ -20,20 +20,22 @@
 #include "util.h"
 #include "monitor_chooser.h"
 
+#include <glib/gi18n.h>
 
 
-#define RSTTO_MAX_MONITORS 9
-
-#define ICON_SIZE 96
-#define ICON_SPACING 12
 #define ICON_RESOURCE_ACTIVE "/org/xfce/ristretto/display-active.svg"
 #define ICON_RESOURCE_INACTIVE "/org/xfce/ristretto/display-inactive.svg"
 
-/* Screen rectangle inside the 64x64 icon viewBox */
-#define ICON_SCREEN_X1 (3.0 / 64.0)
-#define ICON_SCREEN_X2 (61.0 / 64.0)
-#define ICON_SCREEN_Y1 (13.0 / 64.0)
-#define ICON_SCREEN_Y2 (51.0 / 64.0)
+/* The icon is drawn on a 64x64 viewBox with the screen at (3,13)-(61,51);
+ * a size of 128 keeps the screen on whole pixels. */
+#define ICON_SIZE 128
+#define ICON_SCREEN_X 6
+#define ICON_SCREEN_Y 26
+#define CELL_WIDTH 116
+#define CELL_HEIGHT 76
+
+#define GRID_SPACING 8
+#define GRID_MAX_COLUMNS 4
 
 enum
 {
@@ -44,7 +46,6 @@ enum
 static gint rstto_monitor_chooser_signals[RSTTO_MONITOR_CHOOSER_N_SIGNALS];
 
 typedef struct _Monitor Monitor;
-typedef struct _MonitorPosition MonitorPosition;
 
 
 
@@ -67,10 +68,6 @@ static void
 rstto_monitor_chooser_size_allocate (GtkWidget *widget,
                                      GtkAllocation *allocation);
 
-
-static gboolean
-rstto_monitor_chooser_paint (GtkWidget *widget,
-                             cairo_t *ctx);
 static void
 cb_rstto_button_press_event (GtkWidget *widget,
                              GdkEventButton *event);
@@ -79,7 +76,6 @@ paint_monitor (GtkWidget *widget,
                cairo_t *cr,
                gint x,
                gint y,
-               gint size,
                const gchar *label,
                gboolean active);
 
@@ -89,27 +85,19 @@ struct _Monitor
 {
     gint width;
     gint height;
-
-    cairo_surface_t *image_surface;
-};
-
-struct _MonitorPosition
-{
-    guint x;
-    guint y;
-    guint width;
-    guint height;
 };
 
 struct _RsttoMonitorChooserPrivate
 {
     Monitor **monitors;
     gint n_monitors;
+
+    /* Index of the selected grid item, the "All" item comes first */
     gint selected;
 
     cairo_surface_t *icon_active;
     cairo_surface_t *icon_inactive;
-    gint icon_pixel_size;
+    gint icon_scale;
 };
 
 
@@ -122,7 +110,7 @@ static void
 rstto_monitor_chooser_init (RsttoMonitorChooser *chooser)
 {
     chooser->priv = rstto_monitor_chooser_get_instance_private (chooser);
-    chooser->priv->selected = -1;
+    chooser->priv->selected = 0;
     chooser->priv->monitors = g_new0 (Monitor *, 1);
 
     g_signal_connect (chooser, "button-press-event",
@@ -160,11 +148,55 @@ static void
 rstto_monitor_chooser_finalize (GObject *object)
 {
     RsttoMonitorChooser *chooser = RSTTO_MONITOR_CHOOSER (object);
+    gint id;
+
+    for (id = 0; id < chooser->priv->n_monitors; ++id)
+        g_free (chooser->priv->monitors[id]);
+    g_free (chooser->priv->monitors);
 
     g_clear_pointer (&chooser->priv->icon_active, cairo_surface_destroy);
     g_clear_pointer (&chooser->priv->icon_inactive, cairo_surface_destroy);
 
     G_OBJECT_CLASS (rstto_monitor_chooser_parent_class)->finalize (object);
+}
+
+static gboolean
+has_all_item (RsttoMonitorChooser *chooser)
+{
+    return chooser->priv->n_monitors > 1;
+}
+
+static gint
+get_n_items (RsttoMonitorChooser *chooser)
+{
+    return chooser->priv->n_monitors + (has_all_item (chooser) ? 1 : 0);
+}
+
+static void
+get_grid_size (RsttoMonitorChooser *chooser,
+               gint *columns,
+               gint *rows)
+{
+    gint n_items = get_n_items (chooser);
+
+    *columns = MAX (1, MIN (GRID_MAX_COLUMNS, n_items));
+    *rows = MAX (1, (n_items + *columns - 1) / *columns);
+}
+
+static void
+get_cell_position (RsttoMonitorChooser *chooser,
+                   gint item,
+                   gint *x,
+                   gint *y)
+{
+    gint columns, rows, grid_width;
+
+    get_grid_size (chooser, &columns, &rows);
+    grid_width = columns * CELL_WIDTH + (columns - 1) * GRID_SPACING;
+
+    *x = (gtk_widget_get_allocated_width (GTK_WIDGET (chooser)) - grid_width) / 2
+         + (item % columns) * (CELL_WIDTH + GRID_SPACING);
+    *y = (item / columns) * (CELL_HEIGHT + GRID_SPACING);
 }
 
 /**
@@ -195,11 +227,8 @@ rstto_monitor_chooser_realize (GtkWidget *widget)
     attributes.window_type = GDK_WINDOW_CHILD;
     attributes.event_mask = gtk_widget_get_events (widget) | GDK_EXPOSURE_MASK | GDK_BUTTON_PRESS_MASK;
     attributes.visual = gtk_widget_get_visual (widget);
-    // TODO: comment out for now
-    // attributes.colormap = gtk_widget_get_colormap (widget);
 
-    // TODO: comment out for now
-    attributes_mask = GDK_WA_X | GDK_WA_Y | GDK_WA_VISUAL /*| GDK_WA_COLORMAP*/;
+    attributes_mask = GDK_WA_X | GDK_WA_Y | GDK_WA_VISUAL;
     window = gdk_window_new (gtk_widget_get_parent_window (widget), &attributes, attributes_mask);
     gtk_widget_set_window (widget, window);
     gdk_window_set_user_data (window, widget);
@@ -210,7 +239,10 @@ rstto_monitor_chooser_get_preferred_width (GtkWidget *widget,
                                            gint *minimal_width,
                                            gint *natural_width)
 {
-    *minimal_width = *natural_width = 400;
+    gint columns, rows;
+
+    get_grid_size (RSTTO_MONITOR_CHOOSER (widget), &columns, &rows);
+    *minimal_width = *natural_width = columns * CELL_WIDTH + (columns - 1) * GRID_SPACING;
 }
 
 static void
@@ -218,7 +250,10 @@ rstto_monitor_chooser_get_preferred_height (GtkWidget *widget,
                                             gint *minimal_height,
                                             gint *natural_height)
 {
-    *minimal_height = *natural_height = ICON_SIZE;
+    gint columns, rows;
+
+    get_grid_size (RSTTO_MONITOR_CHOOSER (widget), &columns, &rows);
+    *minimal_height = *natural_height = rows * CELL_HEIGHT + (rows - 1) * GRID_SPACING;
 }
 
 static void
@@ -234,42 +269,17 @@ rstto_monitor_chooser_size_allocate (GtkWidget *widget,
     }
 }
 
-static gboolean
-rstto_monitor_chooser_draw (GtkWidget *widget,
-                            cairo_t *cr)
-{
-    cairo_save (cr);
-    rstto_monitor_chooser_paint (widget, cr);
-    cairo_restore (cr);
-    return FALSE;
-}
-
-static void
-get_icon_layout (RsttoMonitorChooser *chooser,
-                 gint alloc_width,
-                 gint alloc_height,
-                 gint *size,
-                 gint *x,
-                 gint *y)
-{
-    gint n = chooser->priv->n_monitors;
-
-    *size = MIN (ICON_SIZE, (alloc_width - (n - 1) * ICON_SPACING) / n);
-    *size = MIN (*size, alloc_height);
-    *x = (alloc_width - (n * *size + (n - 1) * ICON_SPACING)) / 2;
-    *y = (alloc_height - *size) / 2;
-}
-
 static cairo_surface_t *
 load_icon (GtkWidget *widget,
            const gchar *resource,
-           gint pixel_size)
+           gint scale)
 {
     cairo_surface_t *surface;
     GdkPixbuf *pixbuf;
     GError *error = NULL;
 
-    pixbuf = gdk_pixbuf_new_from_resource_at_scale (resource, pixel_size, pixel_size, TRUE, &error);
+    pixbuf = gdk_pixbuf_new_from_resource_at_scale (resource, ICON_SIZE * scale, ICON_SIZE * scale,
+                                                    TRUE, &error);
     if (pixbuf == NULL)
     {
         g_warning ("Failed to load icon '%s': %s", resource, error->message);
@@ -277,56 +287,54 @@ load_icon (GtkWidget *widget,
         return NULL;
     }
 
-    surface = gdk_cairo_surface_create_from_pixbuf (pixbuf, gtk_widget_get_scale_factor (widget),
-                                                    gtk_widget_get_window (widget));
+    surface = gdk_cairo_surface_create_from_pixbuf (pixbuf, scale, gtk_widget_get_window (widget));
     g_object_unref (pixbuf);
 
     return surface;
 }
 
 static void
-update_icons (RsttoMonitorChooser *chooser,
-              gint size)
+update_icons (RsttoMonitorChooser *chooser)
 {
     GtkWidget *widget = GTK_WIDGET (chooser);
-    gint pixel_size = size * gtk_widget_get_scale_factor (widget);
+    gint scale = gtk_widget_get_scale_factor (widget);
 
-    if (pixel_size == chooser->priv->icon_pixel_size)
+    if (scale == chooser->priv->icon_scale)
         return;
 
     g_clear_pointer (&chooser->priv->icon_active, cairo_surface_destroy);
     g_clear_pointer (&chooser->priv->icon_inactive, cairo_surface_destroy);
-    chooser->priv->icon_active = load_icon (widget, ICON_RESOURCE_ACTIVE, pixel_size);
-    chooser->priv->icon_inactive = load_icon (widget, ICON_RESOURCE_INACTIVE, pixel_size);
-    chooser->priv->icon_pixel_size = pixel_size;
+    chooser->priv->icon_active = load_icon (widget, ICON_RESOURCE_ACTIVE, scale);
+    chooser->priv->icon_inactive = load_icon (widget, ICON_RESOURCE_INACTIVE, scale);
+    chooser->priv->icon_scale = scale;
 }
 
 static gboolean
-rstto_monitor_chooser_paint (GtkWidget *widget,
-                             cairo_t *ctx)
+rstto_monitor_chooser_draw (GtkWidget *widget,
+                            cairo_t *cr)
 {
     RsttoMonitorChooser *chooser = RSTTO_MONITOR_CHOOSER (widget);
+    gboolean all_item = has_all_item (chooser);
     gchar *label;
-    gint id, size, x, y;
-    gint alloc_width = gtk_widget_get_allocated_width (widget);
-    gint alloc_height = gtk_widget_get_allocated_height (widget);
-    GtkStyleContext *context = gtk_widget_get_style_context (widget);
+    gint item, x, y;
 
-    gtk_render_background (context, ctx, 0, 0, alloc_width, alloc_height);
+    gtk_render_background (gtk_widget_get_style_context (widget), cr, 0, 0,
+                           gtk_widget_get_allocated_width (widget),
+                           gtk_widget_get_allocated_height (widget));
 
-    if (chooser->priv->n_monitors == 0)
-        return FALSE;
+    update_icons (chooser);
 
-    get_icon_layout (chooser, alloc_width, alloc_height, &size, &x, &y);
-    update_icons (chooser, size);
-
-    for (id = 0; id < chooser->priv->n_monitors; ++id)
+    for (item = 0; item < get_n_items (chooser); ++item)
     {
-        label = g_strdup_printf ("%d", id + 1);
-        cairo_save (ctx);
-        paint_monitor (widget, ctx, x + id * (size + ICON_SPACING), y, size,
-                       label, id == chooser->priv->selected);
-        cairo_restore (ctx);
+        if (all_item && item == 0)
+            label = g_strdup (_("All"));
+        else
+            label = g_strdup_printf ("%d", all_item ? item : item + 1);
+
+        get_cell_position (chooser, item, &x, &y);
+        cairo_save (cr);
+        paint_monitor (widget, cr, x, y, label, item == chooser->priv->selected);
+        cairo_restore (cr);
         g_free (label);
     }
 
@@ -338,7 +346,6 @@ paint_monitor (GtkWidget *widget,
                cairo_t *cr,
                gint x,
                gint y,
-               gint size,
                const gchar *label,
                gboolean active)
 {
@@ -351,21 +358,21 @@ paint_monitor (GtkWidget *widget,
 
     if (icon)
     {
-        cairo_set_source_surface (cr, icon, x, y);
+        cairo_set_source_surface (cr, icon, x - ICON_SCREEN_X, y - ICON_SCREEN_Y);
         cairo_paint (cr);
     }
 
     font_description = pango_font_description_copy (
         pango_context_get_font_description (gtk_widget_get_pango_context (widget)));
     pango_font_description_set_weight (font_description, PANGO_WEIGHT_BOLD);
-    pango_font_description_set_absolute_size (font_description, size * 0.2 * PANGO_SCALE);
+    pango_font_description_set_absolute_size (font_description, CELL_HEIGHT * 0.3 * PANGO_SCALE);
 
     layout = pango_cairo_create_layout (cr);
     pango_layout_set_font_description (layout, font_description);
     pango_layout_set_text (layout, label, -1);
     pango_layout_get_pixel_size (layout, &text_width, &text_height);
 
-    cairo_move_to (cr, x + (size - text_width) / 2.0, y + (size - text_height) / 2.0);
+    cairo_move_to (cr, x + (CELL_WIDTH - text_width) / 2.0, y + (CELL_HEIGHT - text_height) / 2.0);
     cairo_set_source_rgb (cr, 1.0, 1.0, 1.0);
     pango_cairo_show_layout (cr, layout);
 
@@ -394,7 +401,8 @@ rstto_monitor_chooser_new (void)
  * @width:   monitor-width (pixels)
  * @height:  monitor-height (pixels)
  *
- * Add a monitor to the monitor-chooser.
+ * Add a monitor to the monitor-chooser. The selection is reset to "All"
+ * (or to the only monitor).
  */
 gint
 rstto_monitor_chooser_add (RsttoMonitorChooser *chooser,
@@ -402,75 +410,25 @@ rstto_monitor_chooser_add (RsttoMonitorChooser *chooser,
                            gint height)
 {
     Monitor **monitors = g_new0 (Monitor *, chooser->priv->n_monitors + 2);
-    gint id = 0;
+    gint id;
 
     Monitor *monitor = g_new0 (Monitor, 1);
     monitor->width = width;
     monitor->height = height;
 
-    if (NULL == chooser->priv->monitors)
-    {
-        chooser->priv->selected = 0;
-    }
-    else
-    {
-        chooser->priv->selected = 0;
-
-        for (id = 0; chooser->priv->monitors[id]; ++id)
-        {
-            monitors[id] = chooser->priv->monitors[id];
-        }
-        g_free (chooser->priv->monitors);
-    }
+    for (id = 0; id < chooser->priv->n_monitors; ++id)
+        monitors[id] = chooser->priv->monitors[id];
+    g_free (chooser->priv->monitors);
 
     monitors[id] = monitor;
 
     chooser->priv->monitors = monitors;
     chooser->priv->n_monitors++;
+    chooser->priv->selected = 0;
+
+    gtk_widget_queue_resize (GTK_WIDGET (chooser));
 
     return id;
-}
-
-/**
- * rstto_monitor_chooser_set_image_surface:
- * @chooser:    Monitor chooser
- * @monitor_id: Monitor number
- * @surface:    Surface
- * @error:
- *
- * Set the image-surface for a specific monitor. (the image visible in
- * the monitor)
- */
-gint
-rstto_monitor_chooser_set_image_surface (RsttoMonitorChooser *chooser,
-                                         gint monitor_id,
-                                         cairo_surface_t *surface,
-                                         GError **error)
-{
-    Monitor *monitor;
-    gint retval = -1;
-
-    g_return_val_if_fail (monitor_id < chooser->priv->n_monitors, retval);
-
-    monitor = chooser->priv->monitors[monitor_id];
-
-    if (monitor)
-    {
-        if (monitor->image_surface)
-        {
-            cairo_surface_destroy (monitor->image_surface);
-        }
-
-        monitor->image_surface = surface;
-
-        retval = monitor_id;
-    }
-    if (gtk_widget_get_realized (GTK_WIDGET (chooser)))
-    {
-        gtk_widget_queue_draw (GTK_WIDGET (chooser));
-    }
-
-    return retval;
 }
 
 /**
@@ -485,28 +443,17 @@ cb_rstto_button_press_event (GtkWidget *widget,
                              GdkEventButton *event)
 {
     RsttoMonitorChooser *chooser = RSTTO_MONITOR_CHOOSER (widget);
-    gdouble icon_x;
-    gint id, size, x, y;
+    gint item, x, y;
 
-    if (chooser->priv->n_monitors < 2)
-        return;
-
-    get_icon_layout (chooser,
-                     gtk_widget_get_allocated_width (widget),
-                     gtk_widget_get_allocated_height (widget),
-                     &size, &x, &y);
-
-    if (event->y < y + size * ICON_SCREEN_Y1 || event->y > y + size * ICON_SCREEN_Y2)
-        return;
-
-    for (id = 0; id < chooser->priv->n_monitors; ++id)
+    for (item = 0; item < get_n_items (chooser); ++item)
     {
-        icon_x = x + id * (size + ICON_SPACING);
-        if (event->x >= icon_x + size * ICON_SCREEN_X1 && event->x <= icon_x + size * ICON_SCREEN_X2)
+        get_cell_position (chooser, item, &x, &y);
+        if (event->x >= x && event->x < x + CELL_WIDTH
+            && event->y >= y && event->y < y + CELL_HEIGHT)
         {
-            if (id != chooser->priv->selected)
+            if (item != chooser->priv->selected)
             {
-                chooser->priv->selected = id;
+                chooser->priv->selected = item;
 
                 g_signal_emit (chooser,
                                rstto_monitor_chooser_signals[RSTTO_MONITOR_CHOOSER_SIGNAL_CHANGED],
@@ -523,18 +470,21 @@ cb_rstto_button_press_event (GtkWidget *widget,
  * rstto_monitor_chooser_get_selected:
  * @chooser: The monitor-chooser widget
  *
- * Returns the id of the selected monitor.
+ * Returns the id of the selected monitor, or RSTTO_MONITOR_CHOOSER_ALL.
  */
 gint
 rstto_monitor_chooser_get_selected (RsttoMonitorChooser *chooser)
 {
+    if (has_all_item (chooser))
+        return chooser->priv->selected - 1;
+
     return chooser->priv->selected;
 }
 
 /**
  * rstto_monitor_chooser_get_dimensions:
  * @chooser: The monitor-chooser widget
- * @nr:      The monitor-number
+ * @nr:      The monitor-number, RSTTO_MONITOR_CHOOSER_ALL means the first monitor
  * @width:   A gint to store the width of the monitor (in pixels)
  * @height:  A gint to store the height of the monitor (in pixels)
  *
@@ -546,7 +496,10 @@ rstto_monitor_chooser_get_dimensions (RsttoMonitorChooser *chooser,
                                       gint *width,
                                       gint *height)
 {
-    g_return_if_fail (nr < chooser->priv->n_monitors);
+    if (nr == RSTTO_MONITOR_CHOOSER_ALL)
+        nr = 0;
+
+    g_return_if_fail (nr >= 0 && nr < chooser->priv->n_monitors);
 
     *width = chooser->priv->monitors[nr]->width;
     *height = chooser->priv->monitors[nr]->height;

@@ -24,6 +24,8 @@
 
 G_BEGIN_DECLS
 
+#define RSTTO_MONITOR_CHOOSER_ALL -1
+
 #define RSTTO_TYPE_MONITOR_CHOOSER rstto_monitor_chooser_get_type ()
 G_DECLARE_FINAL_TYPE (RsttoMonitorChooser, rstto_monitor_chooser, RSTTO, MONITOR_CHOOSER, GtkWidget)
 
@@ -44,12 +46,6 @@ gint
 rstto_monitor_chooser_add (RsttoMonitorChooser *chooser,
                            gint width,
                            gint height);
-
-gint
-rstto_monitor_chooser_set_image_surface (RsttoMonitorChooser *chooser,
-                                         gint monitor_id,
-                                         cairo_surface_t *surface,
-                                         GError **error);
 
 gint
 rstto_monitor_chooser_get_selected (RsttoMonitorChooser *chooser);

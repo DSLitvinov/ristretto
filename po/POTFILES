@@ -8,6 +8,7 @@ src/preferences_dialog.c
 src/properties_dialog.c
 src/image_list.c
 src/thumbnailer.c
+src/monitor_chooser.c
 src/wallpaper_manager.c
 src/xfce_wallpaper_manager.c
 src/gnome_wallpaper_manager.c

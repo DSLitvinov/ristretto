@@ -38,6 +38,8 @@ ristretto_sources = [
   'util.h',
   'wallpaper_manager.c',
   'wallpaper_manager.h',
+  'wallpaper_preview.c',
+  'wallpaper_preview.h',
   'xfce_wallpaper_manager.c',
   'xfce_wallpaper_manager.h',
 ]

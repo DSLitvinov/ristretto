@@ -933,6 +933,10 @@ msgstr "Применить для всех рабочих мест"
 msgid "Set as wallpaper"
 msgstr "Установить как обои"
 
+#: src/monitor_chooser.c
+msgid "All"
+msgstr "Все"
+
 #: src/xfce_wallpaper_manager.c:302 src/gnome_wallpaper_manager.c:206
 msgid "Auto"
 msgstr "Автоматически"
