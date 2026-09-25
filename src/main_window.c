@@ -1839,6 +1839,11 @@ rstto_main_activate_popup_menu_actions (RsttoMainWindow *window,
         gtk_widget_set_sensitive (widget, activate);
     }
 
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+    widget = gtk_ui_manager_get_widget (window->priv->ui_manager, "/image-viewer-menu/set-as-wallpaper");
+    G_GNUC_END_IGNORE_DEPRECATIONS
+    gtk_widget_set_sensitive (widget, (activate && window->priv->wallpaper_manager) ? TRUE : FALSE);
+
     if (!activate || !rstto_main_window_current_file_is_ephemeral (window))
     {
         for (i = 0; i < G_N_ELEMENTS (actions_for_regular_file); ++i)

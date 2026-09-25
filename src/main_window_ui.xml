@@ -129,6 +129,7 @@
         <menu action="open-with-menu">
             <placeholder name="open-with-apps" />
         </menu>
+        <menuitem action="set-as-wallpaper"/>
         <separator/>
         <menuitem action="zoom-in"/>
         <menuitem action="zoom-out"/>
