@@ -161,7 +161,6 @@ static void
 rstto_gnome_wallpaper_manager_init (RsttoGnomeWallpaperManager *manager)
 {
     GtkWidget *image_prop_grid = gtk_grid_new ();
-    GtkWidget *style_label = gtk_label_new (_("Style:"));
     GtkWidget *vbox;
     GtkWidget *button;
 
@@ -181,9 +180,6 @@ rstto_gnome_wallpaper_manager_init (RsttoGnomeWallpaperManager *manager)
     button = xfce_gtk_button_new_mixed ("gtk-apply", _("_Apply"));
     gtk_dialog_add_action_widget (GTK_DIALOG (manager->priv->dialog), button, GTK_RESPONSE_APPLY);
     gtk_widget_show (button);
-    button = xfce_gtk_button_new_mixed ("gtk-ok", _("_OK"));
-    gtk_dialog_add_action_widget (GTK_DIALOG (manager->priv->dialog), button, GTK_RESPONSE_OK);
-    gtk_widget_show (button);
 
     vbox = gtk_dialog_get_content_area (GTK_DIALOG (manager->priv->dialog));
 
@@ -196,11 +192,10 @@ rstto_gnome_wallpaper_manager_init (RsttoGnomeWallpaperManager *manager)
         rstto_monitor_chooser_add (RSTTO_MONITOR_CHOOSER (manager->priv->monitor_chooser),
                                    monitor_geometry.width, monitor_geometry.height);
     }
-    gtk_box_pack_start (GTK_BOX (vbox), manager->priv->monitor_chooser, FALSE, FALSE, 0);
     gtk_box_pack_start (GTK_BOX (vbox), image_prop_grid, FALSE, FALSE, 0);
+    gtk_box_pack_start (GTK_BOX (vbox), manager->priv->monitor_chooser, FALSE, FALSE, 0);
 
-    gtk_grid_attach (GTK_GRID (image_prop_grid), style_label, 0, 0, 1, 1);
-    gtk_grid_attach (GTK_GRID (image_prop_grid), manager->priv->style_combo, 1, 0, 1, 1);
+    gtk_grid_attach (GTK_GRID (image_prop_grid), manager->priv->style_combo, 0, 0, 1, 1);
 
     gtk_widget_set_hexpand (manager->priv->style_combo, TRUE);
     gtk_combo_box_text_append_text (GTK_COMBO_BOX_TEXT (manager->priv->style_combo), _("Auto"));
