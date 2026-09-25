@@ -20,11 +20,20 @@
 #include "util.h"
 #include "monitor_chooser.h"
 
-#include <math.h>
-
 
 
 #define RSTTO_MAX_MONITORS 9
+
+#define ICON_SIZE 96
+#define ICON_SPACING 12
+#define ICON_RESOURCE_ACTIVE "/org/xfce/ristretto/display-active.svg"
+#define ICON_RESOURCE_INACTIVE "/org/xfce/ristretto/display-inactive.svg"
+
+/* Screen rectangle inside the 64x64 icon viewBox */
+#define ICON_SCREEN_X1 (3.0 / 64.0)
+#define ICON_SCREEN_X2 (61.0 / 64.0)
+#define ICON_SCREEN_Y1 (13.0 / 64.0)
+#define ICON_SCREEN_Y2 (51.0 / 64.0)
 
 enum
 {
@@ -39,6 +48,8 @@ typedef struct _MonitorPosition MonitorPosition;
 
 
 
+static void
+rstto_monitor_chooser_finalize (GObject *object);
 static gboolean
 rstto_monitor_chooser_draw (GtkWidget *widget,
                             cairo_t *cr);
@@ -66,12 +77,10 @@ cb_rstto_button_press_event (GtkWidget *widget,
 static void
 paint_monitor (GtkWidget *widget,
                cairo_t *cr,
-               gdouble x,
-               gdouble y,
-               gdouble width,
-               gdouble height,
-               gchar *label,
-               Monitor *monitor,
+               gint x,
+               gint y,
+               gint size,
+               const gchar *label,
                gboolean active);
 
 
@@ -97,6 +106,10 @@ struct _RsttoMonitorChooserPrivate
     Monitor **monitors;
     gint n_monitors;
     gint selected;
+
+    cairo_surface_t *icon_active;
+    cairo_surface_t *icon_inactive;
+    gint icon_pixel_size;
 };
 
 
@@ -123,7 +136,10 @@ rstto_monitor_chooser_init (RsttoMonitorChooser *chooser)
 static void
 rstto_monitor_chooser_class_init (RsttoMonitorChooserClass *klass)
 {
+    GObjectClass *object_class = G_OBJECT_CLASS (klass);
     GtkWidgetClass *widget_class = GTK_WIDGET_CLASS (klass);
+
+    object_class->finalize = rstto_monitor_chooser_finalize;
 
     widget_class->draw = rstto_monitor_chooser_draw;
     widget_class->realize = rstto_monitor_chooser_realize;
@@ -138,6 +154,17 @@ rstto_monitor_chooser_class_init (RsttoMonitorChooserClass *klass)
                       0, NULL, NULL,
                       g_cclosure_marshal_VOID__VOID,
                       G_TYPE_NONE, 0);
+}
+
+static void
+rstto_monitor_chooser_finalize (GObject *object)
+{
+    RsttoMonitorChooser *chooser = RSTTO_MONITOR_CHOOSER (object);
+
+    g_clear_pointer (&chooser->priv->icon_active, cairo_surface_destroy);
+    g_clear_pointer (&chooser->priv->icon_inactive, cairo_surface_destroy);
+
+    G_OBJECT_CLASS (rstto_monitor_chooser_parent_class)->finalize (object);
 }
 
 /**
@@ -191,7 +218,7 @@ rstto_monitor_chooser_get_preferred_height (GtkWidget *widget,
                                             gint *minimal_height,
                                             gint *natural_height)
 {
-    *minimal_height = *natural_height = 200;
+    *minimal_height = *natural_height = ICON_SIZE;
 }
 
 static void
@@ -217,113 +244,90 @@ rstto_monitor_chooser_draw (GtkWidget *widget,
     return FALSE;
 }
 
+static void
+get_icon_layout (RsttoMonitorChooser *chooser,
+                 gint alloc_width,
+                 gint alloc_height,
+                 gint *size,
+                 gint *x,
+                 gint *y)
+{
+    gint n = chooser->priv->n_monitors;
+
+    *size = MIN (ICON_SIZE, (alloc_width - (n - 1) * ICON_SPACING) / n);
+    *size = MIN (*size, alloc_height);
+    *x = (alloc_width - (n * *size + (n - 1) * ICON_SPACING)) / 2;
+    *y = (alloc_height - *size) / 2;
+}
+
+static cairo_surface_t *
+load_icon (GtkWidget *widget,
+           const gchar *resource,
+           gint pixel_size)
+{
+    cairo_surface_t *surface;
+    GdkPixbuf *pixbuf;
+    GError *error = NULL;
+
+    pixbuf = gdk_pixbuf_new_from_resource_at_scale (resource, pixel_size, pixel_size, TRUE, &error);
+    if (pixbuf == NULL)
+    {
+        g_warning ("Failed to load icon '%s': %s", resource, error->message);
+        g_error_free (error);
+        return NULL;
+    }
+
+    surface = gdk_cairo_surface_create_from_pixbuf (pixbuf, gtk_widget_get_scale_factor (widget),
+                                                    gtk_widget_get_window (widget));
+    g_object_unref (pixbuf);
+
+    return surface;
+}
+
+static void
+update_icons (RsttoMonitorChooser *chooser,
+              gint size)
+{
+    GtkWidget *widget = GTK_WIDGET (chooser);
+    gint pixel_size = size * gtk_widget_get_scale_factor (widget);
+
+    if (pixel_size == chooser->priv->icon_pixel_size)
+        return;
+
+    g_clear_pointer (&chooser->priv->icon_active, cairo_surface_destroy);
+    g_clear_pointer (&chooser->priv->icon_inactive, cairo_surface_destroy);
+    chooser->priv->icon_active = load_icon (widget, ICON_RESOURCE_ACTIVE, pixel_size);
+    chooser->priv->icon_inactive = load_icon (widget, ICON_RESOURCE_INACTIVE, pixel_size);
+    chooser->priv->icon_pixel_size = pixel_size;
+}
+
 static gboolean
 rstto_monitor_chooser_paint (GtkWidget *widget,
                              cairo_t *ctx)
 {
     RsttoMonitorChooser *chooser = RSTTO_MONITOR_CHOOSER (widget);
-    Monitor *monitor;
     gchar *label;
-    gint row_width, id;
-    gdouble width, height;
-    gdouble alloc_width = gtk_widget_get_allocated_width (widget);
-    gdouble alloc_height = gtk_widget_get_allocated_height (widget);
+    gint id, size, x, y;
+    gint alloc_width = gtk_widget_get_allocated_width (widget);
+    gint alloc_height = gtk_widget_get_allocated_height (widget);
     GtkStyleContext *context = gtk_widget_get_style_context (widget);
 
     gtk_render_background (context, ctx, 0, 0, alloc_width, alloc_height);
 
-    if (chooser->priv->n_monitors > 1)
+    if (chooser->priv->n_monitors == 0)
+        return FALSE;
+
+    get_icon_layout (chooser, alloc_width, alloc_height, &size, &x, &y);
+    update_icons (chooser, size);
+
+    for (id = 0; id < chooser->priv->n_monitors; ++id)
     {
-        for (id = 0; chooser->priv->monitors[id]; ++id)
-        {
-            monitor = chooser->priv->monitors[id];
-
-            /* Render the selected monitor a little bigger */
-            if (id == chooser->priv->selected)
-            {
-                if (monitor->width > monitor->height)
-                {
-                    width = alloc_width * 0.4;
-                    height = width;
-                }
-                else
-                {
-                    height = alloc_width * 0.4;
-                    width = height;
-                }
-                label = g_strdup_printf ("%d", id + 1);
-                cairo_save (ctx);
-                paint_monitor (widget, ctx,
-                               alloc_width / 4 - width / 2,
-                               (alloc_height - height) / 2,
-                               width, height, label, monitor, TRUE);
-                cairo_restore (ctx);
-                g_free (label);
-            }
-            else
-            {
-                row_width = sqrt (chooser->priv->n_monitors);
-
-                if (monitor->width > monitor->height)
-                {
-                    width = alloc_width * 0.4 / (row_width + 1);
-                    height = width;
-                }
-                else
-                {
-                    height = alloc_width * 0.4 / chooser->priv->n_monitors;
-                    width = height;
-                }
-
-                label = g_strdup_printf ("%d", id + 1);
-                cairo_save (ctx);
-                if (id < chooser->priv->selected)
-                {
-                    paint_monitor (widget, ctx,
-                                   alloc_width / 2
-                                       + (1 + id % row_width) * alloc_width / (2 * (row_width + 1))
-                                       - width / 2,
-                                   (1 + id / row_width) * alloc_height / (row_width + 2)
-                                       - height / 2,
-                                   width, height, label, monitor, FALSE);
-                }
-                else
-                {
-                    paint_monitor (widget, ctx,
-                                   alloc_width / 2
-                                       + (1 + (id - 1) % row_width) * alloc_width / (2 * (row_width + 1))
-                                       - width / 2,
-                                   (1 + (id - 1) / row_width) * alloc_height / (row_width + 2)
-                                       - height / 2,
-                                   width, height, label, monitor, FALSE);
-                }
-                cairo_restore (ctx);
-                g_free (label);
-            }
-        }
-    }
-    else
-    {
-        if (chooser->priv->monitors[0])
-        {
-            monitor = chooser->priv->monitors[0];
-            if (monitor->width > monitor->height)
-            {
-                width = 200;
-                height = 200;
-            }
-            else
-            {
-                height = 200;
-                width = 200;
-            }
-            cairo_save (ctx);
-            paint_monitor (widget, ctx,
-                           (alloc_width - width) / 2.0,
-                           (alloc_height - height) / 2.0,
-                           width, height, "1", monitor, TRUE);
-            cairo_restore (ctx);
-        }
+        label = g_strdup_printf ("%d", id + 1);
+        cairo_save (ctx);
+        paint_monitor (widget, ctx, x + id * (size + ICON_SPACING), y, size,
+                       label, id == chooser->priv->selected);
+        cairo_restore (ctx);
+        g_free (label);
     }
 
     return FALSE;
@@ -332,181 +336,38 @@ rstto_monitor_chooser_paint (GtkWidget *widget,
 static void
 paint_monitor (GtkWidget *widget,
                cairo_t *cr,
-               gdouble x,
-               gdouble y,
-               gdouble width,
-               gdouble height,
-               gchar *label,
-               Monitor *monitor,
+               gint x,
+               gint y,
+               gint size,
+               const gchar *label,
                gboolean active)
 {
-    /* Do we want the border_padding to be a percentage of the width
-     * parmeter?
-     */
-    gdouble border_padding = 10.0;
-    gdouble foot_height = height / 10.0;
-    gdouble monitor_border_width = height * 0.04;
-
-    /* Assumption: monitor-width is always larger then monitor-height */
-    /******************************************************************/
-    gdouble monitor_height = monitor->height
-                             * (width - 2 * (border_padding + monitor_border_width))
-                             / monitor->width;
-    gdouble monitor_width = width - 2 * (border_padding + monitor_border_width);
-
-    gdouble monitor_x = x + border_padding + monitor_border_width;
-
-    gdouble monitor_y = y + height
-                        - 2 * (border_padding + monitor_border_width)
-                        - foot_height - monitor_height;
-
-    gdouble line_width = 2.0;
-    gdouble radius = monitor_border_width * 0.5;
-    gdouble degrees = M_PI / 180.0;
-    gdouble hscale, vscale;
+    RsttoMonitorChooser *chooser = RSTTO_MONITOR_CHOOSER (widget);
+    cairo_surface_t *icon = active ? chooser->priv->icon_active : chooser->priv->icon_inactive;
+    PangoLayout *layout;
+    PangoFontDescription *font_description;
     gint text_width = 0;
     gint text_height = 0;
 
-    /*******************************************/
-    PangoLayout *layout;
-    PangoFontDescription *font_description;
-
-    /*
-     * Set path for monitor outline and background-color.
-     */
-    cairo_new_sub_path (cr);
-    cairo_arc (cr,
-               monitor_x + monitor_width + monitor_border_width - radius,
-               monitor_y - monitor_border_width + radius,
-               radius, -90 * degrees, 0);
-    cairo_arc (cr,
-               monitor_x + monitor_width + monitor_border_width - radius,
-               monitor_y + monitor_height + monitor_border_width - radius,
-               radius, 0, 90 * degrees);
-    cairo_arc (cr,
-               monitor_x - monitor_border_width + radius,
-               monitor_y + monitor_height + monitor_border_width - radius,
-               radius, 90 * degrees, 180 * degrees);
-    cairo_arc (cr,
-               monitor_x - monitor_border_width + radius,
-               monitor_y - monitor_border_width + radius,
-               radius, 180 * degrees, 270 * degrees);
-    cairo_close_path (cr);
-
-    /* Fill the background-color */
-    cairo_set_source_rgba (cr, 1.0, 1.0, 1.0, 1.0); // white
-    cairo_fill_preserve (cr);
-
-    /* Paint the outside border */
-    cairo_set_source_rgba (cr, 0.231, 0.231, 0.231, 1.0); // dark gray-ish
-    cairo_set_line_width (cr, line_width);
-    cairo_stroke (cr);
-
-    /* Draw a monitor foot */
-    cairo_new_sub_path (cr);
-    cairo_move_to (cr,
-                   monitor_x + (monitor_width - foot_height) / 2.0,
-                   monitor_y + monitor_height + monitor_border_width);
-    cairo_line_to (cr,
-                   monitor_x + (monitor_width - foot_height) / 2.0 + foot_height,
-                   monitor_y + monitor_height + monitor_border_width);
-    cairo_line_to (cr,
-                   monitor_x + (monitor_width - foot_height) / 2.0 + foot_height,
-                   monitor_y + monitor_height + monitor_border_width + foot_height * 0.5);
-    cairo_line_to (cr,
-                   monitor_x + (monitor_width - foot_height) / 2.0 + foot_height * 2,
-                   monitor_y + monitor_height + monitor_border_width + foot_height * 0.5);
-    cairo_line_to (cr,
-                   monitor_x + (monitor_width - foot_height) / 2.0 + foot_height * 2,
-                   monitor_y + monitor_height + monitor_border_width + foot_height);
-    cairo_line_to (cr,
-                   monitor_x + (monitor_width - foot_height) / 2.0 - foot_height,
-                   monitor_y + monitor_height + monitor_border_width + foot_height);
-    cairo_line_to (cr,
-                   monitor_x + (monitor_width - foot_height) / 2.0 - foot_height,
-                   monitor_y + monitor_height + monitor_border_width + foot_height * 0.5);
-    cairo_line_to (cr,
-                   monitor_x + (monitor_width - foot_height) / 2.0,
-                   monitor_y + monitor_height + monitor_border_width + foot_height * 0.5);
-    cairo_close_path (cr);
-    cairo_set_source_rgba (cr, 1.0, 1.0, 1.0, 1.0); // white
-    cairo_fill_preserve (cr);
-    cairo_set_source_rgba (cr, 0.231, 0.231, 0.231, 1.0); // dark gray-ish
-    cairo_set_line_width (cr, line_width);
-    cairo_stroke (cr);
-
-    /* Draw a line around the image */
-    cairo_new_sub_path (cr);
-    cairo_move_to (cr, monitor_x, monitor_y);
-    cairo_line_to (cr, monitor_x + monitor_width, monitor_y);
-    cairo_line_to (cr, monitor_x + monitor_width, monitor_y + monitor_height);
-    cairo_line_to (cr, monitor_x, monitor_y + monitor_height);
-    cairo_close_path (cr);
-    cairo_set_source_rgba (cr, 0.231, 0.231, 0.231, 1.0); // dark gray-ish
-    cairo_set_line_width (cr, line_width);
-    cairo_stroke (cr);
-
-    /* Set the path that limits the image-size */
-    cairo_new_sub_path (cr);
-    cairo_move_to (cr, monitor_x, monitor_y);
-    cairo_line_to (cr, monitor_x + monitor_width, monitor_y);
-    cairo_line_to (cr, monitor_x + monitor_width, monitor_y + monitor_height);
-    cairo_line_to (cr, monitor_x, monitor_y + monitor_height);
-    cairo_close_path (cr);
-
-    /* Color the background black */
-    cairo_set_source_rgba (cr, 0.0, 0.0, 0.0, 1.0);
-    cairo_fill_preserve (cr);
-
-    if (monitor->image_surface)
+    if (icon)
     {
-        cairo_clip_preserve (cr);
-
-        hscale = monitor_width / cairo_image_surface_get_width (monitor->image_surface);
-        vscale = monitor_height / cairo_image_surface_get_height (monitor->image_surface);
-
-        cairo_scale (cr, hscale, vscale);
-
-        cairo_set_source_surface (cr, monitor->image_surface, monitor_x / hscale, monitor_y / vscale);
+        cairo_set_source_surface (cr, icon, x, y);
         cairo_paint (cr);
-
-        cairo_reset_clip (cr);
-        cairo_scale (cr, 1 / hscale, 1 / vscale);
     }
 
-    if (!active)
-    {
-        cairo_set_source_rgba (cr, 1.0, 1.0, 1.0, 0.6);
-        cairo_fill_preserve (cr);
-    }
-
-    cairo_set_source_rgba (cr, 0.5, 0.5, 0.5, 1.0);
-    cairo_set_line_width (cr, line_width);
-    cairo_stroke (cr);
-
-
-    font_description = pango_font_description_new ();
-    pango_font_description_set_family (font_description, "sans");
+    font_description = pango_font_description_copy (
+        pango_context_get_font_description (gtk_widget_get_pango_context (widget)));
     pango_font_description_set_weight (font_description, PANGO_WEIGHT_BOLD);
-    pango_font_description_set_absolute_size (font_description, height * 0.3 * PANGO_SCALE);
-
+    pango_font_description_set_absolute_size (font_description, size * 0.2 * PANGO_SCALE);
 
     layout = pango_cairo_create_layout (cr);
     pango_layout_set_font_description (layout, font_description);
     pango_layout_set_text (layout, label, -1);
-    pango_layout_set_alignment (layout, PANGO_ALIGN_CENTER);
-    pango_cairo_update_layout (cr, layout);
     pango_layout_get_pixel_size (layout, &text_width, &text_height);
 
-    cairo_move_to (cr,
-                   monitor_x + (monitor_width - text_width) / 2,
-                   monitor_y + (monitor_height - text_height) / 2);
-    pango_cairo_layout_path (cr, layout);
-    cairo_set_source_rgba (cr, 1.0, 1.0, 1.0, 0.8);
-    cairo_fill_preserve (cr);
-    cairo_set_line_width (cr, line_width);
-    cairo_set_source_rgba (cr, 0.0, 0.0, 0.0, 0.9);
-    cairo_stroke (cr);
+    cairo_move_to (cr, x + (size - text_width) / 2.0, y + (size - text_height) / 2.0);
+    cairo_set_source_rgb (cr, 1.0, 1.0, 1.0);
+    pango_cairo_show_layout (cr, layout);
 
     g_object_unref (layout);
     pango_font_description_free (font_description);
@@ -624,31 +485,28 @@ cb_rstto_button_press_event (GtkWidget *widget,
                              GdkEventButton *event)
 {
     RsttoMonitorChooser *chooser = RSTTO_MONITOR_CHOOSER (widget);
-    GtkAllocation allocation;
-    gdouble tmp_x, tmp_y;
-    gint row_width, id, width, height;
+    gdouble icon_x;
+    gint id, size, x, y;
 
-    if (chooser->priv->n_monitors > 1)
+    if (chooser->priv->n_monitors < 2)
+        return;
+
+    get_icon_layout (chooser,
+                     gtk_widget_get_allocated_width (widget),
+                     gtk_widget_get_allocated_height (widget),
+                     &size, &x, &y);
+
+    if (event->y < y + size * ICON_SCREEN_Y1 || event->y > y + size * ICON_SCREEN_Y2)
+        return;
+
+    for (id = 0; id < chooser->priv->n_monitors; ++id)
     {
-        row_width = sqrt (chooser->priv->n_monitors);
-
-        gtk_widget_get_allocation (widget, &allocation);
-        width = allocation.width * 0.4 / (row_width + 1);
-        height = width;
-
-        for (id = 0; id < chooser->priv->n_monitors; ++id)
+        icon_x = x + id * (size + ICON_SPACING);
+        if (event->x >= icon_x + size * ICON_SCREEN_X1 && event->x <= icon_x + size * ICON_SCREEN_X2)
         {
-            tmp_x = allocation.width / 2.0
-                    + (1 + id % row_width) * allocation.width / (2.0 * (row_width + 1));
-            tmp_y = (1 + id / row_width) * (gdouble) allocation.height / (row_width + 2);
-
-            if (event->x > tmp_x - width / 2.0 && event->x < tmp_x + width / 2.0
-                && event->y > tmp_y - height / 2.0 && event->y < tmp_y + height / 2.0)
+            if (id != chooser->priv->selected)
             {
-                if (id < chooser->priv->selected)
-                    chooser->priv->selected = id;
-                else if (id + 1 != chooser->priv->n_monitors)
-                    chooser->priv->selected = id + 1;
+                chooser->priv->selected = id;
 
                 g_signal_emit (chooser,
                                rstto_monitor_chooser_signals[RSTTO_MONITOR_CHOOSER_SIGNAL_CHANGED],
@@ -656,6 +514,7 @@ cb_rstto_button_press_event (GtkWidget *widget,
 
                 gtk_widget_queue_draw (widget);
             }
+            break;
         }
     }
 }

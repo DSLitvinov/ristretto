@@ -2,5 +2,7 @@
 <gresources>
   <gresource prefix="/org/xfce/ristretto">
     <file preprocess="xml-stripblanks">main_window_ui.xml</file>
+    <file alias="display-active.svg">../icons/scalable/display-active.svg</file>
+    <file alias="display-inactive.svg">../icons/scalable/display-inactive.svg</file>
   </gresource>
 </gresources>
